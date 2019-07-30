@@ -24,6 +24,7 @@ if False:
         List,
         Optional,
         Set,
+        Tuple,
     )
 
     Task = Coroutine
@@ -256,8 +257,7 @@ class signal(Syscall):
     def _deliver(self) -> None:
         if self.task is not None and self.value is not _NO_VALUE:
             schedule(self.task, self.value)
-            self.task = None
-            self.value = _NO_VALUE
+            self.reset()
 
     def __iter__(self) -> Task:  # type: ignore
         try:
@@ -343,3 +343,59 @@ class spawn(Syscall):
             # close() or throw(), kill the children tasks and re-raise
             self.exit()
             raise
+
+
+class chan:
+    class Put(Syscall):
+        def __init__(self, ch: "chan") -> None:
+            self.ch = ch
+            self.value = None  # type: Any
+
+        def __call__(self, value: Any) -> Syscall:
+            self.value = value
+            return self
+
+        def handle(self, task: Task) -> None:
+            self.ch._schedule_put(task, self.value)
+
+    class Take(Syscall):
+        def __init__(self, ch: "chan") -> None:
+            self.ch = ch
+
+        def __call__(self) -> Syscall:
+            return self
+
+        def handle(self, task) -> None:
+            self.ch._schedule_take(task)
+
+    def __init__(self):
+        self.putters = []  # type: List[Tuple[Optional[Task], Any]]
+        self.takers = []  # type: List[Task]
+        self.put = chan.Put(self)
+        self.take = chan.Take(self)
+
+    def publish(self, value: Any) -> None:
+        if self.takers:
+            taker = self.takers.pop(0)
+            schedule(taker, value)
+        else:
+            self.putters.append((None, value))
+
+    def _schedule_put(self, putter: Task, value: Any) -> None:
+        if self.takers:
+            taker = self.takers.pop(0)
+            schedule(taker, value)
+            schedule(putter, value)
+            return True
+        else:
+            self.putters.append((putter, value))
+            return False
+
+    def _schedule_take(self, taker: Task) -> None:
+        if self.putters:
+            putter, value = self.putters.pop(0)
+            schedule(taker, value)
+            if putter is not None:
+                schedule(putter, value)
+        else:
+            self.takers.append(taker)
